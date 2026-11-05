@@ -11,6 +11,8 @@ jobs:
           persist-credentials: false
       - run: python3 -m pip install build
       - run: python3 -m build
+      - name: Install equilibrium-io 0.3.0
+        run: python3 -m pip install "equilibrium-io @ git+https://github.com/12ff54e/equilibrium-io.git@674bdbbe404bb1c224c4922f20bae984bcc67a01"
       - run: python3 -m pip install dist/*.whl
       - name: Installed package and CLI
         env:

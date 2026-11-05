@@ -6,6 +6,7 @@ native and Boozer file readers. This package owns reconstruction, coordinate
 grids, coil overlays and rendering.
 
 ```sh
+python -m pip install "equilibrium-io @ git+https://github.com/12ff54e/equilibrium-io.git@v0.3.0"
 python -m pip install .
 equilibrium-plot --state equilibrium.bin --output-dir figures
 equilibrium-plot --boozer-state boozer.bin --coordinate-system boozer \
