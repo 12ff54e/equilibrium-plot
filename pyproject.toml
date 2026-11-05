@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "equilibrium-plot"
+version = "0.1.0"
+description = "Scientific figures for cuMES equilibria and Boozer coordinates"
+requires-python = ">=3.9"
+dependencies = ["equilibrium-io>=0.3.0", "numpy", "scipy", "matplotlib", "pillow"]
+license = {file = "LICENSE"}
+
+[project.optional-dependencies]
+hdf5 = ["equilibrium-io[hdf5]>=0.3.0"]
+pyvista = ["pyvista"]
+
+[project.scripts]
+equilibrium-plot = "equilibrium_plot.application:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

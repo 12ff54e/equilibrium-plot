@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""Manufactured checks for the Boozer/PEST plotting data path."""
+
+import os
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+import numpy as np
+
+from equilibrium_plot.coordinate_figures import (
+    _periodic_indices,
+    render_coordinate_figures,
+)
+from equilibrium_plot.coordinates import (
+    ASYMMETRIC_FAMILY_NAMES,
+    FAMILY_NAMES,
+    PERIOD,
+    _synthesize_mixed_fields,
+    load_boozer,
+    BoozerData,
+    make_boozer_grid,
+    make_pest_grid,
+)
+from equilibrium_plot.equilibrium import (
+    boundary_from_params, eval_state, field_lines, half_grid, make_profiles,
+    solve_chip,
+)
+from equilibrium_plot.state_io import ASYM_FAM_NAMES, FAM_NAMES
+from equilibrium_plot.output_paths import figure_path, resolve_output_base
+from equilibrium_plot.render_3d import add_pyvista_field_lines
+from equilibrium_plot.defaults import FIGURE_PARAMETERS
+
+
+def _manufactured_data(lasym=False):
+    source_ns = 4
+    first_surface = 1
+    surfaces = source_ns - first_surface
+    ntheta, nzeta = 12, 6
+    mode_m = np.array([0, 1, 0, 1], dtype="<i4")
+    mode_n = np.array([0, 0, 1, 1], dtype="<i4")
+    s = np.array([1.0 / 3.0, 2.0 / 3.0, 1.0], dtype="<f8")
+    iota = np.array([0.0, 0.45, 0.60], dtype="<f8")
+    radius = np.array([0.15, 0.30, 0.45])
+    names = FAMILY_NAMES + (ASYMMETRIC_FAMILY_NAMES if lasym else ())
+    families = {name: np.zeros((surfaces, 4), dtype="<f8") for name in names}
+    families["rmncc"][:, 0] = 1.5
+    families["rmncc"][:, 1] = radius
+    families["zmnsc"][:, 1] = radius
+    families["numnsc"][:, 1] = 0.08
+    families["numncs"][:, 2] = 0.03
+    if lasym:
+        families["rmnsc"][:, 1] = 0.04
+        families["zmncc"][:, 0] = 0.11
+    theta = PERIOD * np.arange(ntheta) / ntheta
+    alpha = PERIOD * np.arange(nzeta) / nzeta
+    b = np.empty((surfaces, nzeta, ntheta), dtype="<f8")
+    for surface in range(surfaces):
+        b[surface] = (
+            1.0 + 0.1 * surface + 0.2 * np.cos(theta)[None, :]
+            + 0.05 * np.cos(alpha)[:, None]
+        )
+    data = BoozerData("manufactured.json", source_ns, 5, first_surface,
+                      ntheta, nzeta, s, iota, mode_m, mode_n, families, b)
+    return radius, b, data
+
+
+class PlotCoordinateTest(unittest.TestCase):
+    def test_reader_errors_are_reported_by_cli_adapter(self):
+        with patch("equilibrium_plot.coordinates._load_boozer",
+                   side_effect=ValueError("invalid Boozer field")):
+            with self.assertRaisesRegex(SystemExit, "^invalid Boozer field$"):
+                load_boozer("unused.bin")
+
+    def test_radial_lists(self):
+        base = dict(aphi=[1, 0.25], ai=[-0.2, 0.8], ac=[2, 2],
+                    bloat=0.75, curtor=12000, phiedge=2)
+        with self.assertRaisesRegex(ValueError, "unsupported pflux_type"):
+            make_profiles(dict(base, ncurr=0, pflux_type="lis"), 5)
+        listed = dict(base, pflux_type="list", aphi=[1, 1.25, 1.5],
+                      piota_type="list", ai=[-0.2, 0.2, 0.6],
+                      pcurr_type="list", ac=[2, 3, 4])
+        for ns in (5, 8, 11):
+            for ncurr in (0, 1):
+                a = make_profiles(dict(base, ncurr=ncurr), ns)
+                b = make_profiles(dict(listed, ncurr=ncurr), ns)
+                self.assertAlmostEqual(a["lamscale"], b["lamscale"], places=14)
+                for key in ("phip_avg", "chip_iota" if ncurr == 0 else "curr_h"):
+                    np.testing.assert_allclose(
+                        [a[key](j) for j in range(ns - 1)],
+                        [b[key](j) for j in range(ns - 1)], rtol=1e-14, atol=1e-14)
+
+    def test_asymmetric_geometry(self):
+        for lasym in (False, True):
+            with self.subTest(lasym=lasym):
+                radius, expected_b, data = _manufactured_data(lasym)
+                r, z, nu = _synthesize_mixed_fields(data, data.theta_b, data.alpha)
+                shape = (3, 6, 12)
+                expected_r = (1.5 + radius[:, None] * np.cos(data.theta_b)
+                              + (0.04 * np.sin(data.theta_b) if lasym else 0.0))
+                expected_z = (radius[:, None] * np.sin(data.theta_b)
+                              + (0.11 if lasym else 0.0))
+                np.testing.assert_allclose(r, np.broadcast_to(expected_r[:, None, :], shape), atol=1e-14)
+                np.testing.assert_allclose(z, np.broadcast_to(expected_z[:, None, :], shape), atol=1e-14)
+                self.assertTrue(np.all(np.isfinite(nu)))
+                np.testing.assert_array_equal(data.b, expected_b)
+
+    @staticmethod
+    def asymmetric_state():
+        ns, ntor = 5, 1
+        s = np.linspace(0.0, 1.0, ns)
+        families = {name: np.zeros(6 * ns)
+                    for name in FAM_NAMES + ASYM_FAM_NAMES}
+        families["rmncc"][:ns] = 4.0
+        families["rmncc"][2 * ns:3 * ns] = 0.8 * np.sqrt(s)
+        families["zmnsc"][2 * ns:3 * ns] = np.sqrt(s)
+        families["rmncc"][4 * ns:5 * ns] = 0.1 * s
+        families["rmnss"][3 * ns:4 * ns] = 0.2 * np.sqrt(s) * (1 + 0.3 * s)
+        return ns, ntor, families
+
+    def test_metric_contracts_derivatives_on_each_radial_face(self):
+        ns, ntor, families = self.asymmetric_state()
+        theta = PERIOD * np.arange(32) / 32
+        zeta = PERIOD * np.arange(12) / 12
+        arrays = [eval_state(families, ns, j, theta, zeta, ntor, 1)
+                  for j in (1, 2)]
+        metric = half_grid(arrays, ns, 1, 0.0, -1.0, 1.0)
+        # At phi=0, the manufactured R has R_even=.1*s*cos(2*theta)
+        # and R_odd=.8*cos(theta)+.2*(1+.3*s)*sin(theta)*sin(phi).
+        # Contract these analytic tangents with the staggered radial weights.
+        si, so, sh = 0.25, 0.5, np.sqrt(0.375)
+        bi, bo = 0.2 * (1 + 0.3 * si), 0.2 * (1 + 0.3 * so)
+        expected = (-0.4 * np.sin(theta)**2 * (si * bi + so * bo)
+                    - sh * np.sin(2 * theta) * np.sin(theta)
+                    * (0.1 * si * bi + 0.1 * so * bo))
+        np.testing.assert_allclose(metric["guv"][:, 0], expected,
+                                   atol=2e-15, rtol=0)
+
+    def test_asymmetric_plot_field_preserves_prescribed_current(self):
+        ns, ntor, families = self.asymmetric_state()
+        s = np.linspace(0.0, 1.0, ns)
+        families["rmnsc"][2 * ns:3 * ns] = 0.15 * np.sqrt(s)
+        families["zmncc"][ns:2 * ns] = 0.08
+        families["lmncc"][3 * ns:4 * ns] = 0.02 * np.sqrt(s)
+        config = dict(lasym=True, ntheta=32, nzeta=12, ntor=ntor, nfp=1,
+                      ncurr=1, ac=[1.0], ai=[], aphi=[1.0], bloat=1.0,
+                      phiedge=1.0, curtor=1000.0)
+        profiles = make_profiles(config, ns)
+        theta = PERIOD * np.arange(32) / 32
+        zeta = PERIOD * np.arange(12) / 12
+        for jh in (1, 3):
+            chip = solve_chip(families, ns, jh, config, profiles)
+            arrays = [eval_state(families, ns, j, theta, zeta, ntor, 1)
+                      for j in (jh, jh + 1)]
+            fields = half_grid(arrays, ns, jh, chip,
+                               profiles["phip_avg"](jh), profiles["lamscale"])
+            current = np.mean(fields["guu"] * fields["bsupu"]
+                              + fields["guv"] * fields["bsupv"])
+            self.assertAlmostEqual(current, profiles["curr_h"](jh), delta=2e-15)
+
+    def test_boundary_preserves_phase_and_vertical_displacement(self):
+        theta, zeta = np.meshgrid(
+            np.linspace(0.0, PERIOD, 32, endpoint=False),
+            np.linspace(0.0, PERIOD, 12, endpoint=False), indexing="ij")
+        for phase, offset in ((0.0, 0.0), (0.4, 0.1)):
+            with self.subTest(phase=phase):
+                params = {
+                    "rbc": [(0, 0, 3.0), (1, 1, 0.4 * np.cos(phase))],
+                    "zbs": [(1, -1, 0.6 * np.cos(phase))],
+                }
+                if phase:
+                    params["rbs"] = [(1, 1, -0.4 * np.sin(phase))]
+                    params["zbc"] = [(0, 0, offset),
+                                     (1, -1, 0.6 * np.sin(phase))]
+                r, z = boundary_from_params(params, theta, zeta)
+                np.testing.assert_allclose(
+                    r, 3.0 + 0.4 * np.cos(theta - zeta + phase),
+                    atol=2.0e-15, rtol=0.0)
+                np.testing.assert_allclose(
+                    z, offset + 0.6 * np.sin(theta + zeta + phase),
+                    atol=2.0e-15, rtol=0.0)
+
+    def test_field_lines_lift_onto_independent_render_grid(self):
+        theta = np.linspace(0.0, PERIOD, 8, endpoint=False)
+        zeta = np.linspace(0.0, PERIOD, 4, endpoint=False)
+        edge = {
+            "bsupu": np.zeros((theta.size, zeta.size)),
+            "bsupv": np.ones((theta.size, zeta.size)),
+            "r12": np.zeros((theta.size, zeta.size)),
+            "z12": np.zeros((theta.size, zeta.size)),
+        }
+        render_theta = np.linspace(0.0, PERIOD, 16, endpoint=False)
+        render_zeta = np.linspace(0.0, PERIOD, 10, endpoint=False)
+        geometry = {
+            "r": np.repeat(
+                (2.0 + 0.2 * np.cos(render_theta))[:, None],
+                render_zeta.size, axis=1),
+            "z": np.repeat(
+                (0.2 * np.sin(render_theta))[:, None],
+                render_zeta.size, axis=1),
+        }
+        line, = field_lines(
+            edge, theta, zeta, seeds=(0.0,), nfp=1, geometry=geometry,
+            zeta_span=PERIOD, n_steps=64)
+        x, y, z = line
+        np.testing.assert_allclose(np.hypot(x, y), 2.2, atol=1.0e-12)
+        np.testing.assert_allclose(z, 0.0, atol=1.0e-12)
+
+    def test_pyvista_field_lines_use_configured_tubes(self):
+        class Centerline:
+            def __init__(self):
+                self.tube_arguments = None
+
+            def tube(self, **arguments):
+                self.tube_arguments = arguments
+                return "tube-mesh"
+
+        class Plotter:
+            def __init__(self):
+                self.mesh = None
+                self.arguments = None
+
+            def add_mesh(self, mesh, **arguments):
+                self.mesh = mesh
+                self.arguments = arguments
+
+        centerline = Centerline()
+        plotter = Plotter()
+        scene = {
+            "figure_parameters": SimpleNamespace(
+                pyvista_field_line_color="#101020",
+                pyvista_field_line_tube_sides=8),
+            "lines": [(np.array([1.0, 2.0]), np.array([0.0, 0.5]),
+                       np.array([0.0, 0.1]))],
+            "pyvista_field_line_tube_radius": 0.004,
+        }
+        with patch("equilibrium_plot.render_3d.pyvista_polyline",
+                   return_value=centerline):
+            add_pyvista_field_lines(plotter, object(), scene)
+        self.assertEqual(centerline.tube_arguments, {
+            "radius": 0.004, "n_sides": 8, "capping": False})
+        self.assertEqual(plotter.mesh, "tube-mesh")
+        self.assertEqual(plotter.arguments["color"], "#101020")
+        self.assertTrue(plotter.arguments["smooth_shading"])
+
+    def test_periodic_theta_lines_do_not_duplicate_seam(self):
+        indices = _periodic_indices(120, 24)
+        np.testing.assert_array_equal(indices, np.arange(0, 120, 5))
+        wrapped_gaps = np.diff(np.append(indices, indices[0] + 120))
+        np.testing.assert_array_equal(wrapped_gaps, np.full(24, 5))
+
+    def test_directory_only_output_names(self):
+        base = resolve_output_base(output_directory="figure_data")
+        self.assertEqual(figure_path(base, "perspective"),
+                         "figure_data/perspective.png")
+        self.assertEqual(figure_path(base, "pest_field_contours"),
+                         "figure_data/pest_field_contours.png")
+        prefixed = resolve_output_base("plots/equilibrium.png")
+        self.assertEqual(figure_path(prefixed, "perspective"),
+                         "plots/equilibrium_perspective.png")
+
+    def test_synthesis_and_native_pest_remap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            radius, b, data = _manufactured_data()
+            self.assertEqual(data.b.shape, (3, 6, 12))
+            np.testing.assert_array_equal(data.b, b)
+
+            boozer = make_boozer_grid(data)
+            theta = data.theta_b
+            expected_r = 1.5 + radius[:, None] * np.cos(theta)[None, :]
+            expected_z = radius[:, None] * np.sin(theta)[None, :]
+            np.testing.assert_allclose(boozer.r[:, 0], expected_r,
+                                       atol=2.0e-15)
+            np.testing.assert_allclose(boozer.z[:, 0], expected_z,
+                                       atol=2.0e-15)
+
+            # At fixed theta_b, remap the sampled field with the manufactured
+            # version-3 relation
+            # alpha_b=alpha+nfp*(0.08*sin(theta_b)+0.03*sin(alpha)).
+            expected_b = np.empty_like(boozer.b)
+            for poloidal, theta_b in enumerate(theta):
+                mapped = data.alpha + data.nfp * (
+                    0.08 * np.sin(theta_b) + 0.03 * np.sin(data.alpha))
+                for surface in range(3):
+                    expected_b[surface, :, poloidal] = np.interp(
+                        data.alpha, mapped, b[surface, :, poloidal],
+                        period=PERIOD)
+            np.testing.assert_allclose(boozer.b, expected_b, atol=2.0e-12)
+
+            r_native = np.repeat(expected_r[:, None, :], 6, axis=1)
+            z_native = np.repeat(expected_z[:, None, :], 6, axis=1)
+            lambda_physical = np.zeros_like(r_native)
+            lambda_physical[1:] = 0.08 * np.sin(theta)[None, None, :]
+            pest = make_pest_grid(data.s, theta, data.zeta, r_native,
+                                  z_native, b, lambda_physical)
+            # Zero native lambda makes theta and theta_p coincide. The other
+            # surfaces exercise the exact native theta-to-PEST remap.
+            np.testing.assert_allclose(pest.r[0], r_native[0], atol=2.0e-15)
+            np.testing.assert_allclose(pest.b[0], b[0], atol=2.0e-15)
+            self.assertTrue(np.all(np.isfinite(pest.r)))
+            self.assertTrue(np.all(pest.b > 0.0))
+            self.assertGreater(np.max(np.abs(pest.r[2] - boozer.r[2])), 1.0e-3)
+
+    def test_three_figure_families_render(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, data = _manufactured_data()
+            outputs = render_coordinate_figures(
+                data, str(Path(directory)) + os.sep,
+                FIGURE_PARAMETERS)
+            self.assertEqual(len(outputs), 3)
+            self.assertIn(str(Path(directory) / "field_slices.png"),
+                          outputs)
+            self.assertNotIn(
+                str(Path(directory) / "boozer_field_slices.png"),
+                outputs)
+            for output in outputs:
+                self.assertGreater(Path(output).stat().st_size, 1000)
+
+
+if __name__ == "__main__":
+    unittest.main()
