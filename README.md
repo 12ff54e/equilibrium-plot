@@ -50,6 +50,6 @@ python -m pip install dist/*.whl
 python -m unittest discover -s tests
 ```
 
-This initial extraction keeps the cuMES numerical reconstruction and figure
-defaults. The source revision and its `equilibrium-io>=0.3.0` dependency must
-both be published before installing this package from a registry.
+This initial release keeps the cuMES numerical reconstruction and figure
+defaults. It requires `equilibrium-io>=0.3.0`. When using local wheels, install
+the I/O wheel before the plotting wheel.
