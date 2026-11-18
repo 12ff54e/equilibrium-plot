@@ -23,7 +23,7 @@ Native results produce perspective, top, combined and R-Z slice figures.
 `--field-lines` adds LCFS field lines; `--coils PATH` adds coil geometry.
 `--out BASE` prefixes output names, while `--output-dir DIR` writes the
 standard names directly into that directory. PEST reconstruction needs native
-state; Boozer plots use saved Boozer v3–v8 data.
+state; Boozer plots use saved Boozer v7/v8 data.
 
 For custom figures, pass an explicit immutable configuration:
 

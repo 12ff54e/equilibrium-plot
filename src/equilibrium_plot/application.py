@@ -62,7 +62,7 @@ def main(figure_parameters=None, argv=None):
                          "optional pyvista package)")
     ap.add_argument(
         "--boozer-state", metavar="PATH",
-        help="Boozer v3–v8 .bin, .nc, .h5, or .hdf5 result used for the Boozer "
+        help="Boozer v7/v8 .bin, .nc, .h5, or .hdf5 result used for the Boozer "
              "figures; PEST figures are reconstructed from native --state")
     ap.add_argument(
         "--coordinate-system", choices=("both", "pest", "boozer"),
